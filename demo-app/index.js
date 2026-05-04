@@ -12,7 +12,7 @@ async function main() {
   const webhooks = createWebhooks({ endpoint, key });
 
   const event = "msg.delivered";
-  const subscriberUrl = "https://webhook.site/400c7edd-1bc0-4469-af76-5e0b7266673e";
+  const subscriberUrl = process.env.URL;
 
   if (subscriberUrl) {
     const sub = await webhooks.register(event, subscriberUrl);
