@@ -18,5 +18,5 @@ curl -X POST 'http://localhost:3000/api/account' \
 you will get api key in the response 
 ```
 4. run `cp .env.example .env` in the deomp-app dir
-5. update the WEBHOOK_API_KEY with the api key from curl response
-6. 
+5. update the WEBHOOK_API_KEY with the api key from curl response and add a value in the URL where you want to send the event 
+6. run `npm run start` and you receive the update on the webhook if its up 
