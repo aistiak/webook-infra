@@ -51,12 +51,15 @@ export interface Webhooks {
 export class WebhookLibError extends Error {
   readonly status: number;
   readonly body: unknown;
+  /** True when the request never completed (network, refused connection, timeout, etc.). */
+  readonly transportFailure: boolean;
 
-  constructor(message: string, status: number, body: unknown) {
+  constructor(message: string, status: number, body: unknown, transportFailure = false) {
     super(message);
     this.name = 'WebhookLibError';
     this.status = status;
     this.body = body;
+    this.transportFailure = transportFailure;
   }
 }
 
@@ -80,7 +83,114 @@ function isRetryableFetchError(err: unknown): boolean {
   if (err instanceof WebhookLibError) return false;
   if (err instanceof TypeError) return true;
   if (err instanceof DOMException && err.name === 'AbortError') return false;
+  if (err instanceof Error && err.name === 'AbortError') return false;
   return false;
+}
+
+function flattenErrorCauses(err: unknown, maxDepth = 8): unknown[] {
+  const out: unknown[] = [];
+  let cur: unknown = err;
+  for (let i = 0; i < maxDepth && cur != null; i++) {
+    out.push(cur);
+    if (cur instanceof Error && 'cause' in cur && (cur as Error & { cause?: unknown }).cause !== undefined) {
+      cur = (cur as Error & { cause?: unknown }).cause;
+    } else {
+      break;
+    }
+  }
+  return out;
+}
+
+function errnoFromNodeError(e: unknown): string | undefined {
+  if (typeof e === 'object' && e !== null && 'code' in e) {
+    const c = (e as { code?: unknown }).code;
+    return typeof c === 'string' ? c : undefined;
+  }
+  return undefined;
+}
+
+function transportHintForErrno(code: string | undefined): string {
+  switch (code) {
+    case 'ECONNREFUSED':
+      return 'Connection refused — nothing is listening on that host/port (is the webhook infra server running?).';
+    case 'ENOTFOUND':
+      return 'Host not found — check the endpoint hostname/DNS.';
+    case 'ECONNRESET':
+      return 'Connection was reset by the peer.';
+    case 'ETIMEDOUT':
+    case 'ESOCKETTIMEDOUT':
+      return 'Socket timed out before a response — the server may be overloaded or unreachable.';
+    case 'CERT_HAS_EXPIRED':
+    case 'UNABLE_TO_VERIFY_LEAF_SIGNATURE':
+    case 'DEPTH_ZERO_SELF_SIGNED_CERT':
+      return 'TLS/certificate problem when connecting to the endpoint.';
+    default:
+      return '';
+  }
+}
+
+function isAbortError(err: unknown): boolean {
+  return (
+    (err instanceof DOMException && err.name === 'AbortError') ||
+    (err instanceof Error && err.name === 'AbortError')
+  );
+}
+
+function formatTransportFailureMessage(
+  base: string,
+  requestUrl: string,
+  path: string,
+  timeoutMs: number,
+  err: unknown,
+): string {
+  const causes = flattenErrorCauses(err);
+  let errno: string | undefined;
+  for (const c of causes) {
+    const code = errnoFromNodeError(c);
+    if (code) {
+      errno = code;
+      break;
+    }
+  }
+
+  let summary: string;
+  if (causes.some(isAbortError)) {
+    summary = `Request was aborted — usually a timeout after ${timeoutMs}ms or an explicit cancel.`;
+  } else {
+    const hint = transportHintForErrno(errno);
+    summary = hint || 'The client could not complete the HTTP request (network or runtime error).';
+  }
+
+  const root = causes[0];
+  const underlying =
+    root instanceof Error
+      ? root.stack
+        ? root.stack.split('\n').slice(0, 3).join('\n')
+        : root.message
+      : String(root);
+
+  const lines = [
+    'Webhook infra unreachable — there was no HTTP response from the server.',
+    '',
+    `  Configured endpoint: ${base}`,
+    `  Request:             POST ${path}`,
+    `  Full URL:            ${requestUrl}`,
+    '',
+    `  What went wrong: ${summary}`,
+  ];
+  if (errno) {
+    lines.push(`  System code:     ${errno}`);
+  }
+  lines.push('', '  Technical detail (first lines):');
+  for (const line of underlying.split('\n')) {
+    lines.push(`    ${line}`);
+  }
+  return lines.join('\n');
+}
+
+function transportFailure(base: string, requestUrl: string, path: string, timeoutMs: number, err: unknown): WebhookLibError {
+  const message = formatTransportFailureMessage(base, requestUrl, path, timeoutMs, err);
+  return new WebhookLibError(message, 0, null, true);
 }
 
 function errorDetail(body: unknown, fallback: string): string {
@@ -117,16 +227,28 @@ export function createWebhooks(options: CreateWebhooksOptions): Webhooks {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const res = await fetchImpl(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': key,
-        },
-        body: JSON.stringify(json),
-        signal: controller.signal,
-      });
-      const text = await res.text();
+      let res: Response;
+      try {
+        res = await fetchImpl(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': key,
+          },
+          body: JSON.stringify(json),
+          signal: controller.signal,
+        });
+      } catch (err) {
+        throw transportFailure(base, url.href, path, timeoutMs, err);
+      }
+
+      let text: string;
+      try {
+        text = await res.text();
+      } catch (err) {
+        throw transportFailure(base, url.href, path, timeoutMs, err);
+      }
+
       let body: unknown;
       try {
         body = text ? (JSON.parse(text) as unknown) : null;
@@ -141,7 +263,12 @@ export function createWebhooks(options: CreateWebhooksOptions): Webhooks {
 
   function fail(status: number, body: unknown, prefix: string): never {
     const detail = errorDetail(body, typeof body === 'string' ? body : JSON.stringify(body));
-    throw new WebhookLibError(`${prefix} (${status}): ${detail}`, status, body);
+    const lines = [
+      `${prefix} (${status})`,
+      '',
+      `  Detail: ${detail}`,
+    ];
+    throw new WebhookLibError(lines.join('\n'), status, body);
   }
 
   return {
@@ -169,6 +296,10 @@ export function createWebhooks(options: CreateWebhooksOptions): Webhooks {
         } catch (err) {
           lastErr = err;
           if (err instanceof WebhookLibError) {
+            if (err.transportFailure && attempt < maxEmitAttempts - 1) {
+              await delay(100 * 2 ** attempt);
+              continue;
+            }
             throw err;
           }
           if (isRetryableFetchError(err) && attempt < maxEmitAttempts - 1) {
