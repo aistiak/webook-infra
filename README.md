@@ -6,7 +6,7 @@
 1. have to run the infra first 
 run `docker-compose up -d` at the root of the porject
 2. cd to the `demo-app` dir and install dependencies with `npm install`
-3. make a curl request to obtail the api key
+3. make a curl request to obtain the api key
 ```
 curl -X POST 'http://localhost:3000/api/account' \
   --header 'User-Agent: yaak' \
