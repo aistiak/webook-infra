@@ -20,3 +20,13 @@ you will get api key in the response
 4. run `cp .env.example .env` in the deomp-app dir
 5. update the WEBHOOK_API_KEY with the api key from curl response and add a value in the URL where you want to send the event 
 6. run `npm run start` and you receive the update on the webhook if its up 
+
+
+## Delivery Garuntee 
+1. since things are not stored in the client side event if clinet lib fails infra will take care of it
+2. the infra backing the typescript library has retry mechanism 
+   
+
+## Revisit if i have more time
+
+event sending order, current implmentation does not garuntee the order of the events sent to the same subscriber , might add some sort of queue like bull / rabbitmq to implement this
