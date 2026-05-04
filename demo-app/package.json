@@ -1,0 +1,17 @@
+{
+  "name": "demo-app",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Demo consumer for webhook-lib (emit events with API key).",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "webhook-lib": "file:../webhook-lib"
+  }
+}

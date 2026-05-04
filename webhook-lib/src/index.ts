@@ -1,4 +1,189 @@
 /**
+ * Configuration for {@link createWebhooks}.
+ */
+export interface CreateWebhooksOptions {
+  /** Base URL of the webhook API (e.g. `https://relay.example.com` or `http://127.0.0.1:3000`). */
+  readonly endpoint: string;
+  /** Account API key (sent as `x-api-key`). */
+  readonly key: string;
+  /**
+   * Maximum HTTP attempts for {@link Webhooks.emit} on retryable failures
+   * (5xx, 408, 429, network errors). Defaults to `3`. Not used for {@link Webhooks.register}.
+   */
+  readonly maxEmitAttempts?: number;
+  /** Per-request timeout in ms. Defaults to `30_000`. */
+  readonly timeoutMs?: number;
+  /** Override `fetch` (tests or custom agents). */
+  readonly fetch?: typeof fetch;
+}
+
+/** Result of {@link Webhooks.register} (`POST /api/subscribe`). */
+export interface RegisterSubscriberResult {
+  readonly id: string;
+  readonly accountId: string;
+  readonly event: string;
+  readonly subscriberUrl: string;
+}
+
+/** Result of {@link Webhooks.emit} (`POST /api/omit`). */
+export interface EmitEventResult {
+  readonly ok: boolean;
+  readonly deliveredTo: number;
+}
+
+/**
+ * Client returned by {@link createWebhooks} for registering subscribers and emitting events.
+ */
+export interface Webhooks {
+  /**
+   * Registers a subscriber URL for an event (idempotent from the server’s perspective:
+   * each call may create a new subscription row).
+   */
+  register(event: string, subscriberUrl: string): Promise<RegisterSubscriberResult>;
+
+  /**
+   * Delivers a payload to all subscribers registered for `event` for this account.
+   * Retries on transient HTTP failures and network errors.
+   */
+  emit(event: string, msg: unknown): Promise<EmitEventResult>;
+}
+
+export class WebhookLibError extends Error {
+  readonly status: number;
+  readonly body: unknown;
+
+  constructor(message: string, status: number, body: unknown) {
+    super(message);
+    this.name = 'WebhookLibError';
+    this.status = status;
+    this.body = body;
+  }
+}
+
+function normalizeBase(endpoint: string): string {
+  const s = endpoint.trim();
+  if (!s) {
+    throw new Error('createWebhooks: endpoint is required');
+  }
+  return s.replace(/\/+$/, '');
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function isRetryableEmitStatus(status: number): boolean {
+  return status === 408 || status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
+}
+
+function isRetryableFetchError(err: unknown): boolean {
+  if (err instanceof WebhookLibError) return false;
+  if (err instanceof TypeError) return true;
+  if (err instanceof DOMException && err.name === 'AbortError') return false;
+  return false;
+}
+
+function errorDetail(body: unknown, fallback: string): string {
+  if (typeof body === 'object' && body !== null && 'error' in body) {
+    return String((body as { error?: unknown }).error);
+  }
+  return fallback;
+}
+
+/**
+ * Builds a webhook client for registering subscriber URLs and emitting events
+ * to your webhook relay (webhook-infra–compatible API).
+ *
+ * @example
+ * ```ts
+ * const webhooks = createWebhooks({ endpoint: 'https://api.example.com', key: process.env.WEBHOOK_KEY! });
+ * await webhooks.register('order.created', 'https://example.com/hook');
+ * await webhooks.emit('order.created', { orderId: '42' });
+ * ```
+ */
+export function createWebhooks(options: CreateWebhooksOptions): Webhooks {
+  const base = normalizeBase(options.endpoint);
+  const key = options.key;
+  if (!key) {
+    throw new Error('createWebhooks: key is required');
+  }
+
+  const fetchImpl = options.fetch ?? globalThis.fetch;
+  const timeoutMs = options.timeoutMs ?? 30_000;
+  const maxEmitAttempts = Math.max(1, options.maxEmitAttempts ?? 3);
+
+  async function post(path: string, json: unknown): Promise<{ status: number; body: unknown }> {
+    const url = new URL(path.startsWith('/') ? path : `/${path}`, `${base}/`);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetchImpl(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': key,
+        },
+        body: JSON.stringify(json),
+        signal: controller.signal,
+      });
+      const text = await res.text();
+      let body: unknown;
+      try {
+        body = text ? (JSON.parse(text) as unknown) : null;
+      } catch {
+        body = { raw: text };
+      }
+      return { status: res.status, body };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  function fail(status: number, body: unknown, prefix: string): never {
+    const detail = errorDetail(body, typeof body === 'string' ? body : JSON.stringify(body));
+    throw new WebhookLibError(`${prefix} (${status}): ${detail}`, status, body);
+  }
+
+  return {
+    async register(event: string, subscriberUrl: string): Promise<RegisterSubscriberResult> {
+      const { status, body } = await post('/api/subscribe', { event, subscriber: subscriberUrl });
+      if (status !== 201) {
+        fail(status, body, 'register failed');
+      }
+      return body as RegisterSubscriberResult;
+    },
+
+    async emit(event: string, msg: unknown): Promise<EmitEventResult> {
+      let lastErr: unknown;
+      for (let attempt = 0; attempt < maxEmitAttempts; attempt++) {
+        try {
+          const { status, body } = await post('/api/omit', { event, msg });
+          if (status >= 200 && status < 300) {
+            return body as EmitEventResult;
+          }
+          if (isRetryableEmitStatus(status) && attempt < maxEmitAttempts - 1) {
+            await delay(100 * 2 ** attempt);
+            continue;
+          }
+          fail(status, body, 'emit failed');
+        } catch (err) {
+          lastErr = err;
+          if (err instanceof WebhookLibError) {
+            throw err;
+          }
+          if (isRetryableFetchError(err) && attempt < maxEmitAttempts - 1) {
+            await delay(100 * 2 ** attempt);
+            continue;
+          }
+          throw err;
+        }
+      }
+      throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+    },
+  };
+}
+
+/**
  * Optional configuration for {@link WebhookProcessor}.
  */
 export interface WebhookProcessorOptions {

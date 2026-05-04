@@ -1,6 +1,6 @@
 # webhook-lib
 
-Small TypeScript library scaffold for webhook helpers (`WebhookProcessor`, `validateSignature`). Builds to **CommonJS** and **ESM** with declaration files.
+TypeScript client for registering webhook subscribers and emitting events against a webhook-infra–compatible API (`createWebhooks`). Also includes optional receive-side placeholders (`WebhookProcessor`, `validateSignature`). Builds to **CommonJS** and **ESM** with declaration files.
 
 ## Requirements
 
@@ -39,22 +39,30 @@ Or depend on the folder via `file:` in the consumer’s `package.json`:
 **ESM (`import`)**
 
 ```ts
-import { WebhookProcessor, validateSignature } from 'webhook-lib';
+import { createWebhooks } from 'webhook-lib';
 
-const processor = new WebhookProcessor({ name: 'checkout' });
-await processor.process('order.created', { orderId: 123 });
+const webhooks = createWebhooks({
+  endpoint: process.env.WEBHOOK_BASE_URL!,
+  key: process.env.WEBHOOK_API_KEY!,
+});
 
-const trusted = validateSignature(rawBody, signatureHeader, process.env.WEBHOOK_SECRET!);
+await webhooks.register('order.created', 'https://example.com/hook');
+await webhooks.emit('order.created', { orderId: '42' });
 ```
 
 **CommonJS (`require`)**
 
 ```js
-const { WebhookProcessor, validateSignature } = require('webhook-lib');
+const { createWebhooks } = require('webhook-lib');
 
-const processor = new WebhookProcessor();
-void validateSignature('{}', 'sig', 'secret');
+async function main() {
+  const webhooks = createWebhooks({ endpoint: 'http://127.0.0.1:3000', key: process.env.WEBHOOK_API_KEY });
+  await webhooks.register('order.created', 'https://example.com/hook');
+}
+void main();
 ```
+
+Optional receive-side placeholders: `WebhookProcessor`, `validateSignature` (see type definitions).
 
 ## Scripts
 
