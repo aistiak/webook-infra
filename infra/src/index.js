@@ -60,6 +60,20 @@ async function main() {
     if (!isHttpUrl(subscriberUrl)) {
       return res.status(400).json({ error: 'subscriber must be a valid http(s) URL' });
     }
+    const existing = await Subscriber.findOne({
+      accountId: req.account._id,
+      event,
+      subscriberUrl,
+    });
+    if (existing) {
+      console.log(` subscription already exists`)
+      return res.status(201).json({
+        id: existing._id,
+        accountId: existing.accountId,
+        event: existing.event,
+        subscriberUrl: existing.subscriberUrl,
+      });
+    }
 
     const sub = await Subscriber.create({
       accountId: req.account._id,
@@ -92,11 +106,14 @@ async function main() {
       .select('subscriberUrl')
       .lean();
 
-    await deliverEventToTargets(req.account._id, event, msg, targets);
+    // Fire and forget deliverEventToTargets
+    deliverEventToTargets(req.account._id, event, msg, targets).catch((err) => {
+      // Optionally log error (does not affect user response)
+      console.error('Error delivering events async:', err);
+    });
 
     return res.json({
       ok: true,
-      deliveredTo: targets.length,
     });
   });
 

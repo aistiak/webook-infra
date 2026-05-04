@@ -4,7 +4,7 @@
 ### how to run 
 
 1. have to run the infra first 
-run `docker-compose up -d` at the root of the porject
+run `docker compose up -d` at the root of the project
 2. cd to the `demo-app` dir and install dependencies with `npm install`
 3. make a curl request to obtain the api key
 ```
@@ -24,9 +24,9 @@ you will get api key in the response
 
 ## Delivery Garuntee 
 1. since things are not stored in the client side event if clinet lib fails infra will take care of it
-2. the infra backing the typescript library has retry mechanism 
+2. the infra backing the typescript library has retry mechanism with exponential backoff and `dql` status for manually identification and retry if necessary
    
 
-## Revisit if i have more time
+## Revisit One thing if i have more time
 
-event sending order, current implmentation does not garuntee the order of the events sent to the same subscriber , might add some sort of queue like bull / rabbitmq to implement this
+event sending order, current implementation does not guarantee the order of the events sent to the same subscriber , might add some sort of queue like bull / rabbitmq to implement this
